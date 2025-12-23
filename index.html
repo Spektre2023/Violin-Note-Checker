@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Violin Note Checker (MusicXML)</title>
+  <style>
+    :root { --pad: 14px; --radius: 14px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #fafafa; color:#111; }
+    header { padding: 18px var(--pad); background: white; border-bottom: 1px solid #eee; position: sticky; top:0; z-index: 5; }
+    h1 { font-size: 18px; margin: 0 0 6px 0; }
+    .sub { font-size: 13px; color:#555; }
+    main { padding: var(--pad); display: grid; gap: 12px; }
+    .row { display:flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .card { background:white; border:1px solid #eee; border-radius: var(--radius); padding: 12px; }
+    .card strong { font-size: 13px; color:#555; display:block; margin-bottom: 6px; }
+    button {
+      border: 0; border-radius: 12px; padding: 11px 14px;
+      font-size: 15px; background:#111; color:white;
+    }
+    button[disabled]{ opacity:.5; }
+    input[type="number"]{ padding:10px 10px; border-radius: 12px; border:1px solid #ddd; font-size: 15px; width: 90px; }
+    input[type="file"]{ font-size: 14px; }
+    #osmd { background:white; border:1px solid #eee; border-radius: var(--radius); padding: 10px; overflow:auto; }
+    #status { font-size: 14px; color:#444; }
+    #bigNote { font-size: 26px; font-weight: 700; }
+    .pill { display:inline-block; padding: 6px 10px; border-radius: 999px; background:#f2f2f2; font-size: 13px; }
+    .good { background:#e7f7ea; }
+    .bad { background:#fdeaea; }
+    .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    #log { max-height: 180px; overflow:auto; font-size: 13px; line-height: 1.35; }
+    .tiny { font-size: 12px; color:#666; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Violin Note Checker</h1>
+    <div class="sub">Upload a valid MusicXML file → tap Start practice → it scores the performance.</div>
+  </header>
+
+  <div class="card" id="debugBox" style="display:none; white-space:pre-wrap; border-color:#f2c2c2; background:#fff5f5;">
+    Debug: (copy this if you need help)
+  </div>
+
+  <main>
+    <div class="row">
+      <div class="card" style="flex:1; min-width:260px;">
+        <strong>1) Load MusicXML</strong>
+        <div class="row">
+          <input id="file" type="file" accept=".xml,.musicxml,.mxl" />
+          <span id="status" class="pill">No score loaded</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>Tempo</strong>
+        <div class="row">
+          <span class="pill">BPM</span>
+          <input id="bpm" type="number" min="30" max="240" value="80" />
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>Tolerance</strong>
+        <div class="row">
+          <span class="pill">± semitones</span>
+          <input id="tol" type="number" min="0" max="2" value="0" />
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="start" disabled>Start practice</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="reset" disabled>Reset score</button>
+
+      
+      <button id="micTest">Mic test</button>
+      <button id="micStop" disabled>Stop test</button>
+      <span class="pill mono">Mic: <span id="micStatus">idle</span></span>
+      <span class="pill mono">Level: <span id="micLevel">0%</span></span>
+<span class="pill mono">Expected: <span id="expNote">—</span></span>
+      <span class="pill mono">Heard: <span id="heardNote">—</span></span>
+      <span class="pill mono">Hz: <span id="hz">—</span></span>
+
+      <span class="pill mono">Correct: <span id="correct">0</span>/<span id="total">0</span></span>
+      <span class="pill mono">Score: <span id="pct">—</span></span>
+      <span class="pill" id="stars">☆☆☆☆☆</span>
+    </div>
+
+
+    <div class="card" id="micPlaybackCard" style="display:none;">
+      <strong>Mic test playback</strong>
+      <audio id="micPlayback" controls style="width:100%;"></audio>
+      <div class="tiny">If you can hear this playback clearly, the browser is recording audio correctly.</div>
+    </div>
+
+
+    <div class="card">
+      <strong>Live note</strong>
+      <div id="bigNote">—</div>
+    </div>
+
+    <div id="osmd"></div>
+
+    <div class="card">
+      <strong>Note-by-note log</strong>
+      <div id="log" class="mono"></div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js"></script>
+<script>
+
+    // ===== Built-in pitch detector (no external libs) =====
+    // Autocorrelation-based; good enough for single-note practice (violin/piano).
+    function detectPitchAutoCorr(buf, sampleRate) {
+      const SIZE = buf.length;
+      let rms = 0;
+      for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+      rms = Math.sqrt(rms / SIZE);
+      if (rms < 0.01) return null; // too quiet
+
+      // Trim ends
+      let r1 = 0, r2 = SIZE - 1;
+      for (let i = 0; i < SIZE / 2; i++) { if (Math.abs(buf[i]) < 0.2) { r1 = i; break; } }
+      for (let i = 1; i < SIZE / 2; i++) { if (Math.abs(buf[SIZE - i]) < 0.2) { r2 = SIZE - i; break; } }
+
+      const slice = buf.slice(r1, r2);
+      const n = slice.length;
+      if (n < 32) return null;
+
+      const c = new Float32Array(n);
+      for (let lag = 0; lag < n; lag++) {
+        let sum = 0;
+        for (let i = 0; i < n - lag; i++) sum += slice[i] * slice[i + lag];
+        c[lag] = sum;
+      }
+
+      let d = 0;
+      while (d + 1 < n && c[d] > c[d + 1]) d++;
+
+      let maxpos = -1, maxval = -1;
+      for (let i = d; i < n; i++) {
+        if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+      }
+      if (maxpos <= 0) return null;
+      return sampleRate / maxpos;
+    }
+
+    function showError(msg){
+      const box = document.getElementById("debugBox");
+      if (box){
+        box.style.display = "block";
+        box.textContent = msg;
+      } else {
+        alert(msg);
+      }
+    }
+    window.addEventListener("error", (e) => {
+      showError("JS error: " + (e.message || e.error || e));
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      showError("Promise error: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+    });
+
+    const el = (id) => document.getElementById(id);
+    const fileInput = el("file");
+    const statusEl = el("status");
+    const startBtn = el("start");
+    const stopBtn = el("stop");
+    const resetBtn = el("reset");
+    const bpmInput = el("bpm");
+    const tolInput = el("tol");
+    const expNoteEl = el("expNote");
+    const heardNoteEl = el("heardNote");
+    const hzEl = el("hz");
+    const correctEl = el("correct");
+    const totalEl = el("total");
+    const pctEl = el("pct");
+    const starsEl = el("stars");
+    const bigNoteEl = el("bigNote");
+    const logEl = el("log");
+
+    // Mic test UI
+    const micTestBtn = el("micTest");
+    const micStopBtn = el("micStop");
+    const micStatusEl = el("micStatus");
+    const micLevelEl = el("micLevel");
+    const micPlaybackCard = el("micPlaybackCard");
+    const micPlayback = el("micPlayback");
+
+    let micTestStream = null;
+    let micTestCtx = null;
+    let micTestAnalyser = null;
+    let micTestSource = null;
+    let micTestRaf = null;
+    let micRecorder = null;
+    let micChunks = [];
+
+    function setMicStatus(s) {
+      micStatusEl.textContent = s;
+    }
+
+    function startLevelMeter() {
+      if (!micTestAnalyser || !micTestCtx) return;
+      const buf = new Float32Array(micTestAnalyser.fftSize);
+
+      const tick = () => {
+        micTestRaf = requestAnimationFrame(tick);
+        micTestAnalyser.getFloatTimeDomainData(buf);
+
+        // Compute RMS level
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length); // 0..~1
+        const pct = Math.max(0, Math.min(100, Math.round(rms * 140))); // scale for readability
+        micLevelEl.textContent = pct + "%";
+      };
+      tick();
+    }
+
+    async function stopMicTest() {
+      try {
+        micStopBtn.disabled = true;
+        micTestBtn.disabled = false;
+
+        if (micTestRaf) cancelAnimationFrame(micTestRaf);
+        micTestRaf = null;
+
+        if (micRecorder && micRecorder.state !== "inactive") {
+          micRecorder.stop();
+        } else {
+          // Ensure we still stop stream if recorder isn't available
+          if (micTestStream) micTestStream.getTracks().forEach(t => t.stop());
+          micTestStream = null;
+          if (micTestCtx) await micTestCtx.close();
+          micTestCtx = null;
+          setMicStatus("stopped");
+        }
+      } catch (e) {
+        console.error(e);
+        alert("Mic test stop error:\n\n" + (e && e.message ? e.message : e));
+      }
+    }
+
+    async function startMicTest() {
+      micPlaybackCard.style.display = "none";
+      micPlayback.src = "";
+      micChunks = [];
+      micLevelEl.textContent = "0%";
+
+      try {
+        setMicStatus("requesting…");
+        micTestBtn.disabled = true;
+        micStopBtn.disabled = false;
+
+        micTestStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false }
+        });
+
+        // Level meter
+        micTestCtx = new (window.AudioContext || window.webkitAudioContext)();
+        micTestSource = micTestCtx.createMediaStreamSource(micTestStream);
+        micTestAnalyser = micTestCtx.createAnalyser();
+        micTestAnalyser.fftSize = 2048;
+        micTestSource.connect(micTestAnalyser);
+        startLevelMeter();
+
+        // Recorder (for playback)
+        if (typeof MediaRecorder === "undefined") {
+          setMicStatus("meter only (no recorder)");
+          alert("This browser can access the mic (level meter works), but MediaRecorder isn't supported here, so playback isn't available.");
+          return;
+        }
+
+        // Choose a broadly supported mimeType if possible
+        let options = {};
+        const preferred = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/mp4",
+          "audio/aac"
+        ];
+        for (const mt of preferred) {
+          if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mt)) {
+            options.mimeType = mt;
+            break;
+          }
+        }
+
+        micRecorder = new MediaRecorder(micTestStream, options);
+        micRecorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) micChunks.push(ev.data);
+        };
+
+        micRecorder.onstop = async () => {
+          // Stop stream + audio context
+          if (micTestStream) micTestStream.getTracks().forEach(t => t.stop());
+          micTestStream = null;
+
+          if (micTestCtx) await micTestCtx.close();
+          micTestCtx = null;
+
+          // Build playback blob
+          const blob = new Blob(micChunks, { type: micRecorder.mimeType || "audio/webm" });
+          const url = URL.createObjectURL(blob);
+
+          micPlayback.src = url;
+          micPlaybackCard.style.display = "block";
+          setMicStatus("recorded ✓");
+        };
+
+        micRecorder.start();
+        setMicStatus("recording… (tap Stop test)");
+
+      } catch (e) {
+        console.error(e);
+        micTestBtn.disabled = false;
+        micStopBtn.disabled = true;
+        setMicStatus("blocked");
+        alert("Microphone access failed.\n\nCommon fixes:\n• On iPad/iPhone: Settings → Safari → Microphone → Allow\n• In Safari/Chrome: Site Settings → Microphone → Allow\n• Make sure you\u2019re on HTTPS (GitHub Pages is fine)\n\nError: " + (e && e.message ? e.message : e));      }
+    }
+
+    micTestBtn.addEventListener("click", startMicTest);
+    micStopBtn.addEventListener("click", stopMicTest);
+
+if (!window.opensheetmusicdisplay) {
+      showError("OpenSheetMusicDisplay library failed to load. If you're on a restricted Wi‑Fi, the CDN may be blocked. Try hotspot / different network.");
+    }
+    const osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("osmd", {
+      autoResize: true,
+      backend: "svg",
+      drawTitle: true
+    });
+
+    const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    function midiToName(m) {
+      if (m == null) return "—";
+      return NOTE_NAMES[(m%12+12)%12] + (Math.floor(m/12)-1);
+    }
+    function hzToMidi(hz) {
+      if (!hz) return null;
+      return Math.round(12*Math.log2(hz/440)+69);
+    }
+    function starFromPct(p) {
+      if (!isFinite(p)) return "☆☆☆☆☆";
+      if (p>=0.95) return "★★★★★";
+      if (p>=0.85) return "★★★★☆";
+      if (p>=0.70) return "★★★☆☆";
+      if (p>=0.55) return "★★☆☆☆";
+      return "★☆☆☆☆";
+    }
+
+    let expected=[], scoreLoaded=false;
+    function buildExpected() {
+      expected=[];
+      const cursor=osmd.cursor; cursor.show(); cursor.reset();
+      const seen=new Set();
+      while(!cursor.iterator.EndReached){
+        const ts=cursor.iterator.currentTimeStamp;
+        const q=ts?.RealValue;
+        const ves=cursor.iterator.CurrentVoiceEntries||[];
+        for(const ve of ves){
+          for(const n of (ve.Notes||[])){
+            if(n.halfTone!=null && q!=null){
+              const key=q+":"+n.halfTone;
+              if(!seen.has(key)){
+                seen.add(key);
+                expected.push({midi:n.halfTone,startQ:q});
+              }
+              break;
+            }
+          }
+        }
+        cursor.next();
+      }
+      cursor.hide();
+      const bpm=Number(bpmInput.value)||80;
+      const q2s=60/bpm;
+      expected.sort((a,b)=>a.startQ-b.startQ);
+      expected.forEach((n,i)=>{
+        const next=expected[i+1];
+        const dq=next?next.startQ-n.startQ:1;
+        n.startSec=n.startQ*q2s;
+        n.endSec=(n.startQ+dq)*q2s;
+      });
+      totalEl.textContent=expected.length;
+      scoreLoaded=expected.length>0;
+      startBtn.disabled=!scoreLoaded;
+      resetBtn.disabled=!scoreLoaded;
+    }
+
+    fileInput.onchange = async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+
+      statusEl.textContent = "Loading…";
+      try {
+        const txt = await f.text();
+
+        // Strip any DOCTYPE (external DTD references can stall on some networks/browsers)
+        const cleaned = txt.replace(/<!DOCTYPE[\s\S]*?>/i, "");
+
+        // Quick sanity checks: real MusicXML files are typically KBs and contain a score root element.
+        const looksLikeMusicXML =
+          /<score-partwise/i.test(txt) || /<score-timewise/i.test(txt);
+
+        if (!looksLikeMusicXML || txt.length < 500) {
+          throw new Error(
+            "This file doesn't look like valid MusicXML. " +
+            "It should contain <score-partwise> (or <score-timewise>) and usually be several KB+. " +
+            "Try exporting again, or use a different converter."
+          );
+        }
+
+        await osmd.load(cleaned);
+        await osmd.render();
+        buildExpected();
+
+        statusEl.textContent = "Loaded ✓";
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Load failed";
+        alert("Could not load this MusicXML file:\n\n" + (err && err.message ? err.message : err));
+      }
+    };
+
+    let audioCtx, analyser, source, stream, raf;
+    let idx=0, correct=0, startT;
+
+    async function startPractice(){
+      idx=0; correct=0;
+      correctEl.textContent="0"; pctEl.textContent="—"; starsEl.textContent="☆☆☆☆☆";
+      stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      audioCtx=new AudioContext();
+      analyser=audioCtx.createAnalyser(); analyser.fftSize=2048;
+      source=audioCtx.createMediaStreamSource(stream); source.connect(analyser);
+      // Pitch detector uses detectPitchAutoCorr (no external dependency)
+      const buf=new Float32Array(analyser.fftSize);
+      startT=audioCtx.currentTime;
+      function tick(){
+        raf=requestAnimationFrame(tick);
+        const t=audioCtx.currentTime-startT;
+        if(idx>=expected.length){ stopPractice(); return; }
+        const n=expected[idx];
+        expNoteEl.textContent=midiToName(n.midi);
+        analyser.getFloatTimeDomainData(buf);
+        const hz=detectPitchAutoCorr(buf, audioCtx.sampleRate);
+        hzEl.textContent=hz?hz.toFixed(1):"—";
+        const hm=hz?hzToMidi(hz):null;
+        heardNoteEl.textContent=midiToName(hm);
+        bigNoteEl.textContent=midiToName(hm);
+        if(t>n.endSec){
+          idx++;
+        } else if(hm!=null && Math.abs(hm-n.midi)<=Number(tolInput.value||0)){
+          correct++; idx++;
+        }
+        correctEl.textContent=correct;
+        const pct=correct/expected.length;
+        pctEl.textContent=Math.round(pct*100)+"%";
+        starsEl.textContent=starFromPct(pct);
+      }
+      tick();
+      startBtn.disabled=true; stopBtn.disabled=false; resetBtn.disabled=true;
+    }
+    async function stopPractice(){
+      cancelAnimationFrame(raf);
+      stream?.getTracks().forEach(t=>t.stop());
+      await audioCtx?.close();
+      startBtn.disabled=false; stopBtn.disabled=true; resetBtn.disabled=false;
+    }
+    startBtn.onclick=startPractice;
+    stopBtn.onclick=stopPractice;
+    resetBtn.onclick=()=>{correct=0; idx=0; correctEl.textContent="0";};
+  </script>
+</body>
+</html>
