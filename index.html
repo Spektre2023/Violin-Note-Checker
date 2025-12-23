@@ -47,8 +47,14 @@
       <div class="card" style="flex:1; min-width:260px;">
         <strong>1) Load MusicXML</strong>
         <div class="row">
-          <input id="file" type="file" />
+
+          <div class="row" style="gap:10px;">
+            <button id="chooseBtn" type="button" style="background:#111;color:#fff;">Choose MusicXML</button>
+            <input id="file" type="file" style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
+            <span id="chosenName" class="pill mono">No file chosen</span>
+          </div>
           <span id="status" class="pill">No score loaded</span>
+
         </div>
       
         <div class="tiny">iPhone/iPad tip: if MusicXML files ever appear greyed out in the picker, this is an iOS limitation with file-type filters. This app accepts any file and will validate it after selection.</div>
@@ -168,7 +174,16 @@
 
     const el = (id) => document.getElementById(id);
     const fileInput = el("file");
-    const statusEl = el("status");
+    const chooseBtn = el("chooseBtn");
+    const chosenNameEl = el("chosenName");
+
+    // iOS Chrome/Safari can be flaky clicking the native file input directly inside complex layouts.
+    // Use a real button to trigger the picker (still counts as a user gesture).
+    chooseBtn.addEventListener("click", () => {
+      try { fileInput.click(); } catch (e) { console.error(e); }
+    });
+
+const statusEl = el("status");
     const startBtn = el("start");
     const stopBtn = el("stop");
     const resetBtn = el("reset");
@@ -396,6 +411,8 @@ if (!window.opensheetmusicdisplay) {
     fileInput.onchange = async (e) => {
       const f = e.target.files && e.target.files[0];
       if (!f) return;
+
+      if (chosenNameEl) chosenNameEl.textContent = f.name || 'Selected';
 
       statusEl.textContent = "Loading…";
       try {
